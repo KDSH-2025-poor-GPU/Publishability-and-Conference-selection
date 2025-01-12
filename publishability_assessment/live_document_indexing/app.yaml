@@ -1,0 +1,45 @@
+$sources:
+  - !pw.io.gdrive.read
+    object_id: "1RKyDkAyW7cf09THED7Ms4LNBdeTDWnlK"
+    service_user_credentials_file: credentials.json
+    file_name_pattern:
+      - "*.pdf"
+      - "*.pptx"
+    object_size_limit: null
+    with_metadata: true
+    refresh_interval: 30
+
+$embedding_model: "mixedbread-ai/mxbai-embed-large-v1"
+
+$embedder: !pw.xpacks.llm.embedders.SentenceTransformerEmbedder
+  model: $embedding_model
+  call_kwargs:
+    show_progress_bar: False
+
+$splitter: !pw.xpacks.llm.splitters.TokenCountSplitter
+  max_tokens: 400
+
+$parser: !pw.xpacks.llm.parsers.ParseUnstructured
+  cache_strategy: !pw.udfs.DefaultCache
+
+$retriever_factory: !pw.stdlib.indexing.LshKnnFactory
+  embedder: $embedder
+  distance_type: 'cosine'
+  dimensions: 1024
+
+document_store: !pw.xpacks.llm.document_store.DocumentStore
+  docs: $sources
+  parser: $parser
+  splitter: $splitter
+  retriever_factory: $retriever_factory
+
+# Change host and port by uncommenting these lines
+#host: "0.0.0.0"
+port: 1234
+
+# Cache configuration
+with_cache: true
+
+# If terminate_on_error is true then the program will terminate whenever any error is encountered.
+# Defaults to false, uncomment the following line if you want to set it to true
+# terminate_on_error: true
