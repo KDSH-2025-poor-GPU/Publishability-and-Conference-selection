@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  main:
+    image: Conference_Selection-main
+    container_name: main_service
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data    
+    environment:
+      - USE_OCR=False      
+    depends_on:
+      - api                 
+  
+  api:
+    image: Conference_Selection-api
+    container_name: api_service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"        
