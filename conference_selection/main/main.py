@@ -1,15 +1,21 @@
 import os
 import fitz
 import logging
+from dotenv import load_dotenv
+import pandas as pd
 import requests
 import re
 import pathway as pw
+from litellm import APIError
 from transformers import AutoTokenizer
 import json
 import csv
 import google.generativeai as genai
 from collections import defaultdict
+from pathway.xpacks.llm.splitters import TokenCountSplitter
 import time
+
+load_dotenv()
 
 # Initialize tokenizer for the specified model
 model_name = "mixedbread-ai/mxbai-embed-large-v1"
@@ -28,7 +34,6 @@ with open(csv_file_path, mode="r", newline="") as csvfile:
 api_key = os.environ.get("API_KEY")
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel(model_name="gemini-1.5-flash")
-
 # Mapping of parent folder IDs to conference labels (unchanged)
 PARENT_TO_LABEL = {
     "1sJKv0o5ySrigZewU_wtTxysx9j0kO_nV": "KDD",
@@ -111,13 +116,16 @@ def determine_label(parent_folder_id):
 
 def split_text_into_chunks(text, max_tokens=400):
     """Split text into chunks each with at most max_tokens using the tokenizer."""
-    tokens = tokenizer.encode(text)
-    chunks = []
-    for i in range(0, len(tokens), max_tokens):
-        chunk_tokens = tokens[i : i + max_tokens]
-        chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
-        chunks.append(chunk_text)
-    return chunks
+    class InputSchema(pw.Schema):
+        text: str
+    df = pd.DataFrame(data={"text": [text, ]})
+    text_table = pw.debug.table_from_pandas(df, schema=InputSchema)
+    splitter = TokenCountSplitter(max_tokens=max_tokens)
+    chunks = text_table.select(chunks=splitter(pw.this.text))
+    chunks = pw.debug.table_to_pandas(chunks)
+    chunks = chunks['chunks'].to_list()[0]
+    chunks_list = [chunk[0] for chunk in chunks]
+    return chunks_list
 
 
 # URL of the API endpoint
@@ -127,14 +135,19 @@ api_url = "http://0.0.0.0:8000/v1/retrieve"
 def send_chunk_to_api(chunk):
     headers = {"Content-Type": "application/json"}
     params = {"query": chunk, "k": 1}
-    response = requests.get(api_url, headers=headers, params=params)
-    if response.status_code == 200:
-        data = response.json()
-        logging.info(f"API Response: {data}")
-        return data
-    else:
-        logging.error(f"Failed to fetch data. Status code: {response.status_code}")
-        return None
+    while True:
+        try:
+            response = requests.get(api_url, headers=headers, params=params)
+            if response.status_code == 200:
+                data = response.json()
+                logging.info(f"API Response: {data}")
+                return data
+            else:
+                raise APIError(f"Failed to fetch data. Status code: {response.status_code}")
+        except Exception as e:
+            logging.error(f"Error sending chunk to API: {e}")
+            logging.error("Trying again in 5 seconds...")
+            time.sleep(5)
 
 
 def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
@@ -204,7 +217,7 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
 
 # Set up reading from Google Drive with metadata
 table = pw.io.gdrive.read(
-    object_id="1Pct8i0Tvok1hcsuuRhx_BJQkuFJYaTjq",  # main folder ID; adjust if needed
+    object_id="1Y2Y0EsMalo26KcJiPYcAXh6UzgMNjh4u",  # main folder ID; adjust if needed
     service_user_credentials_file="credentials.json",
     with_metadata=True,  # Retrieve metadata alongside file data
 )

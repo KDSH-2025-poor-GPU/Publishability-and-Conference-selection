@@ -1,8 +1,7 @@
 import logging
-
+import subprocess
 import pathway as pw
 from dotenv import load_dotenv
-from pathway.xpacks.llm.question_answering import SummaryQuestionAnswerer
 from pathway.xpacks.llm.document_store import DocumentStore
 from pathway.xpacks.llm.servers import DocumentStoreServer
 from pydantic import BaseModel, ConfigDict, InstanceOf
