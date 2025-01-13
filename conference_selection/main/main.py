@@ -1,9 +1,6 @@
 import os
 import fitz
-import io
 import logging
-import pytesseract
-from PIL import Image
 import requests
 import re
 import pathway as pw
@@ -12,18 +9,26 @@ import json
 import csv
 import google.generativeai as genai
 from collections import defaultdict
-from pathway.xpacks.llm.splitters import TokenCountSplitter
+import time
 
 # Initialize tokenizer for the specified model
 model_name = "mixedbread-ai/mxbai-embed-large-v1"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-# Toggle OCR if necessary
-USE_OCR = False
+# Load CSV and create a lookup for publishable papers
+PUBLISHABLE_LOOKUP = {}
+csv_file_path = "sorted_results_df.csv"  # Update with your CSV file path
+with open(csv_file_path, mode="r", newline="") as csvfile:
+    reader = csv.DictReader(csvfile, delimiter=",")
+    for row in reader:
+        paper_id = row["paper_id"].strip()
+        is_publishable = row["is_publishable_pred"].strip() == "1"
+        PUBLISHABLE_LOOKUP[paper_id] = is_publishable
 
-api_key = "AIzaSyDQ_s3CR_zqfbAzBfbLOr8ziXu6MzPf_f0"
+api_key = os.environ.get("API_KEY")
 genai.configure(api_key=api_key)
 model = genai.GenerativeModel(model_name="gemini-1.5-flash")
+
 # Mapping of parent folder IDs to conference labels (unchanged)
 PARENT_TO_LABEL = {
     "1sJKv0o5ySrigZewU_wtTxysx9j0kO_nV": "KDD",
@@ -47,7 +52,9 @@ def write_to_csv(paper_id, recommended_conference, rationale):
         writer.writerow([paper_id, recommended_conference, rationale])
 
 
-def generate_rationale(query_text, recommended_conference):
+def generate_rationale(
+    query_text, recommended_conference, max_attempts=5, delay_seconds=5
+):
     prompt = f"""
     RESEARCH PAPER:
     {query_text}
@@ -61,15 +68,25 @@ def generate_rationale(query_text, recommended_conference):
     4.**Impact**: The potential influence of the paper in advancing research or practice in the conference's field.
 
     Ensure that the rationale is **meaningful**, **contextual**, and **concise**, staying within the specified word count range (130-150 WORDS). The explanation should focus on why this paper is an ideal match for the conference's focus and objectives.
-"""
-    response = response = model.generate_content(prompt)
-    return response.text
+    """
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = model.generate_content(prompt)
+            return response.text
+        except Exception as e:
+            logging.error(f"Attempt {attempt} - Error generating rationale: {e}")
+            if attempt < max_attempts:
+                logging.info(f"Retrying in {delay_seconds} seconds...")
+                time.sleep(delay_seconds)
+            else:
+                logging.error("Max attempts reached. Returning failure message.")
+                return "Rationale generation failed due to repeated API errors."
 
 
-def extract_text_from_pdf_bytes(pdf_bytes, use_ocr=False):
+def extract_text_from_pdf_bytes(pdf_bytes):
     """
     Extract text from a PDF given as bytes.
-    If use_ocr is True and no text is extracted, perform OCR on each page.
     """
     text = ""
     try:
@@ -79,12 +96,6 @@ def extract_text_from_pdf_bytes(pdf_bytes, use_ocr=False):
             page_text = page.get_text()
             if page_text.strip():
                 text += page_text
-            elif use_ocr:
-                # Render page to image for OCR
-                pix = page.get_pixmap()
-                img = Image.open(io.BytesIO(pix.tobytes()))
-                ocr_text = pytesseract.image_to_string(img)
-                text += ocr_text
         doc.close()
     except Exception as e:
         logging.error(f"Error processing PDF bytes: {e}")
@@ -102,9 +113,6 @@ def split_text_into_chunks(text, max_tokens=400):
     """Split text into chunks each with at most max_tokens using the tokenizer."""
     tokens = tokenizer.encode(text)
     chunks = []
-    # splitter = pw.xpacks.llm.splitters.TokenCountSplitter(max_tokens=max_tokens)
-    # chunks = splitter(text)
-    # logging.info(type(chunks))  # debug
     for i in range(0, len(tokens), max_tokens):
         chunk_tokens = tokens[i : i + max_tokens]
         chunk_text = tokenizer.decode(chunk_tokens, skip_special_tokens=True)
@@ -122,13 +130,11 @@ def send_chunk_to_api(chunk):
     response = requests.get(api_url, headers=headers, params=params)
     if response.status_code == 200:
         data = response.json()
-        # Process the returned data as needed
-        logging.info(f"type(data): {type(data)}")
         logging.info(f"API Response: {data}")
         return data
     else:
         logging.error(f"Failed to fetch data. Status code: {response.status_code}")
-        return ""
+        return None
 
 
 def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
@@ -151,11 +157,20 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
         except Exception as e:
             logging.error(f"Error parsing metadata: {e}")
 
+        paper_id = metadata.get("name").rstrip(".pdf")
+
+        # Check if the paper is publishable using the CSV lookup
+        if paper_id not in PUBLISHABLE_LOOKUP or not PUBLISHABLE_LOOKUP[paper_id]:
+            logging.info(
+                f"Paper {paper_id} is not publishable. Marking conference and rationale as N/A."
+            )
+            write_to_csv(paper_id, "N/A", "N/A")  # Log non-publishable papers as N/A
+            return  # Skip further processing for non-publishable papers
+
         parent_folder_id = metadata.get("parent")
-        # Label determination remains for potential future use
         label = determine_label(parent_folder_id)
 
-        text = extract_text_from_pdf_bytes(pdf_bytes, use_ocr=USE_OCR)
+        text = extract_text_from_pdf_bytes(pdf_bytes)
 
         # Clean the extracted text
         cleaned_text = re.sub(r"(?<=\.)\n", " \n", text)
@@ -169,15 +184,22 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
         for chunk in chunks:
             data = send_chunk_to_api(chunk)
             if data:
-                recommended_conference = PARENT_TO_LABEL[
-                    data[0]["metadata"]["parents"][0]
-                ]
+                # Safely get conference recommendation from the API response
+                parent_id = data[0]["metadata"]["parents"][0]
+                recommended_conference = PARENT_TO_LABEL.get(parent_id, "Unknown")
                 conference_vote[recommended_conference] += 1
-        final_conference = max(conference_vote, key=conference_vote.get)
-        # recommended_conference = PARENT_TO_LABEL[data[0]["metadata"]["parents"][0]]
+
+        # Determine final conference based on votes
+        if conference_vote:
+            final_conference = max(conference_vote, key=conference_vote.get)
+        else:
+            final_conference = "Unlabeled"
+
         rationale = generate_rationale(cleaned_text, final_conference)
-        write_to_csv(data[0]["metadata"]["name"], final_conference, rationale)
-        logging.info(f"Processed file {metadata.get('name')}, sent all chunks to API.")
+        write_to_csv(paper_id, final_conference, rationale)
+        logging.info(
+            f"Processed publishable paper {paper_id}, selected conference {final_conference}."
+        )
 
 
 # Set up reading from Google Drive with metadata
