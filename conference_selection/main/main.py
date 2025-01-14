@@ -2,6 +2,7 @@ import os
 import fitz
 import logging
 from dotenv import load_dotenv
+import numpy as np
 import pandas as pd
 import requests
 import re
@@ -14,25 +15,26 @@ import google.generativeai as genai
 from collections import defaultdict
 from pathway.xpacks.llm.splitters import TokenCountSplitter
 import time
+from joblib import load
+from notebook_loader import generate_optimized_prompt,generate_scores,score_paper
 
+classfier_model=load("decisionclassifier.joblib")
 load_dotenv()
 
 # Initialize tokenizer for the specified model
 model_name = "mixedbread-ai/mxbai-embed-large-v1"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-# Load CSV and create a lookup for publishable papers
-PUBLISHABLE_LOOKUP = {}
-csv_file_path = "sorted_results_df.csv"  # Update with your CSV file path
-with open(csv_file_path, mode="r", newline="") as csvfile:
-    reader = csv.DictReader(csvfile, delimiter=",")
-    for row in reader:
-        paper_id = row["paper_id"].strip()
-        is_publishable = row["is_publishable_pred"].strip() == "1"
-        PUBLISHABLE_LOOKUP[paper_id] = is_publishable
+# PUBLISHABLE_LOOKUP = {}
+# csv_file_path = "sorted_results_df.csv"  # Update with your CSV file path
+# with open(csv_file_path, mode="r", newline="") as csvfile:
+#     reader = csv.DictReader(csvfile, delimiter=",")
+#     for row in reader:
+#         paper_id = row["paper_id"].strip()
+#         is_publishable = row["is_publishable_pred"].strip() == "1"
+#         PUBLISHABLE_LOOKUP[paper_id] = is_publishable
 
-api_key = os.environ.get("API_KEY")
-genai.configure(api_key=api_key)
+genai.configure(api_key=os.environ["API_KEY"])
 model = genai.GenerativeModel(model_name="gemini-1.5-flash")
 # Mapping of parent folder IDs to conference labels (unchanged)
 PARENT_TO_LABEL = {
@@ -46,20 +48,18 @@ PARENT_TO_LABEL = {
 }
 
 
-def write_to_csv(paper_id, recommended_conference, rationale):
-    file_exists = os.path.exists("unlabeled_results.csv")
-    with open("unlabeled_results.csv", mode="a", newline="") as file:
+def write_to_csv(paper_id,publishability, recommended_conference, rationale):
+    file_exists = os.path.exists("results.csv")
+    with open("results.csv", mode="a", newline="") as file:
         writer = csv.writer(file)
         if not file_exists:
             writer.writerow(
-                ["Paper Id", "Recommended Conference", "Rationale"]
+                ["Paper Id","Publishability", "Recommended Conference", "Rationale"]
             )  # Add header
-        writer.writerow([paper_id, recommended_conference, rationale])
+        writer.writerow([paper_id,publishability, recommended_conference, rationale])
 
 
-def generate_rationale(
-    query_text, recommended_conference, max_attempts=5, delay_seconds=5
-):
+def generate_rationale(query_text, recommended_conference, max_attempts=5, delay_seconds=5):
     prompt = f"""
     RESEARCH PAPER:
     {query_text}
@@ -90,9 +90,6 @@ def generate_rationale(
 
 
 def extract_text_from_pdf_bytes(pdf_bytes):
-    """
-    Extract text from a PDF given as bytes.
-    """
     text = ""
     try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -108,14 +105,10 @@ def extract_text_from_pdf_bytes(pdf_bytes):
 
 
 def determine_label(parent_folder_id):
-    """
-    Determine the label based on the parent folder ID using the mapping.
-    """
     return PARENT_TO_LABEL.get(parent_folder_id, "Unknown")
 
 
 def split_text_into_chunks(text, max_tokens=400):
-    """Split text into chunks each with at most max_tokens using the tokenizer."""
     class InputSchema(pw.Schema):
         text: str
     df = pd.DataFrame(data={"text": [text, ]})
@@ -144,19 +137,14 @@ def send_chunk_to_api(chunk):
                 return data
             else:
                 raise APIError(f"Failed to fetch data. Status code: {response.status_code}")
-        except Exception as e:
+        except (APIError, ConnectionError) as e:
             logging.error(f"Error sending chunk to API: {e}")
             logging.error("Trying again in 5 seconds...")
             time.sleep(5)
 
 
 def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
-    """
-    Callback function that processes each new/changed PDF file,
-    extracts text, splits it into chunks, and sends each chunk to the API.
-    """
     if is_addition:
-        # Retrieve PDF bytes and raw metadata
         pdf_bytes = row.get("data")
         raw_metadata = row.get("_metadata")
 
@@ -172,13 +160,12 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
 
         paper_id = metadata.get("name").rstrip(".pdf")
 
-        # Check if the paper is publishable using the CSV lookup
-        if paper_id not in PUBLISHABLE_LOOKUP or not PUBLISHABLE_LOOKUP[paper_id]:
-            logging.info(
-                f"Paper {paper_id} is not publishable. Marking conference and rationale as N/A."
-            )
-            write_to_csv(paper_id, "N/A", "N/A")  # Log non-publishable papers as N/A
-            return  # Skip further processing for non-publishable papers
+        # if paper_id not in PUBLISHABLE_LOOKUP or not PUBLISHABLE_LOOKUP[paper_id]:
+        #     logging.info(
+        #         f"Paper {paper_id} is not publishable. Marking conference and rationale as N/A."
+        #     )
+        #     write_to_csv(paper_id, "N/A", "N/A")  # Log non-publishable papers as N/A
+        #     return  # Skip further processing for non-publishable papers
 
         parent_folder_id = metadata.get("parent")
         label = determine_label(parent_folder_id)
@@ -189,30 +176,41 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
         cleaned_text = re.sub(r"(?<=\.)\n", " \n", text)
         cleaned_text = re.sub(r"(?<!\.\s)\n+", " ", cleaned_text)
 
-        # Split into chunks of at most 400 tokens
-        chunks = split_text_into_chunks(cleaned_text, max_tokens=400)
+        score_dict=generate_scores(cleaned_text,model)
+        scores=[]
+        for criteria,score in score_dict.items():
+            scores.append(score)
+        scores_array = np.array(scores)
+        scores_array = scores_array.reshape(1,-1)
+        prediction=classfier_model.predict(scores_array)[0]
+        
+        if prediction==1:
+            # Split into chunks of at most 400 tokens
+            chunks = split_text_into_chunks(cleaned_text, max_tokens=400)
 
-        # Send each chunk to the API
-        conference_vote = defaultdict(int)
-        for chunk in chunks:
-            data = send_chunk_to_api(chunk)
-            if data:
-                # Safely get conference recommendation from the API response
-                parent_id = data[0]["metadata"]["parents"][0]
-                recommended_conference = PARENT_TO_LABEL.get(parent_id, "Unknown")
-                conference_vote[recommended_conference] += 1
+            # Send each chunk to the API
+            conference_vote = defaultdict(int)
+            for chunk in chunks:
+                data = send_chunk_to_api(chunk)
+                if data:
+                    # Safely get conference recommendation from the API response
+                    parent_id = data[0]["metadata"]["parents"][0]
+                    recommended_conference = PARENT_TO_LABEL.get(parent_id, "Unknown")
+                    conference_vote[recommended_conference] += 1
 
-        # Determine final conference based on votes
-        if conference_vote:
-            final_conference = max(conference_vote, key=conference_vote.get)
-        else:
-            final_conference = "Unlabeled"
+            # Determine final conference based on votes
+            if conference_vote:
+                final_conference = max(conference_vote, key=conference_vote.get)
+            else:
+                final_conference = "Unlabeled"
 
-        rationale = generate_rationale(cleaned_text, final_conference)
-        write_to_csv(paper_id, final_conference, rationale)
-        logging.info(
-            f"Processed publishable paper {paper_id}, selected conference {final_conference}."
-        )
+            rationale = generate_rationale(cleaned_text, final_conference)
+            write_to_csv(paper_id,prediction, final_conference, rationale)
+            logging.info(
+                f"Processed publishable paper {paper_id}, selected conference {final_conference}."
+            )
+        else :
+            write_to_csv(paper_id,prediction, "N/A", "N/A")
 
 
 # Set up reading from Google Drive with metadata
