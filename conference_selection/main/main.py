@@ -36,7 +36,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 genai.configure(api_key=os.environ["API_KEY"])
 model = genai.GenerativeModel(model_name="gemini-1.5-flash")
-# Mapping of parent folder IDs to conference labels (unchanged)
+# Mapping of parent folder IDs to conference labels 
 PARENT_TO_LABEL = {
     "1sJKv0o5ySrigZewU_wtTxysx9j0kO_nV": "KDD",
     "1ZgkbpvhoNKUuH0b4uCv30lyWg3-5ijTC": "NeurIPS",
@@ -55,7 +55,7 @@ def write_to_csv(paper_id,publishability, recommended_conference, rationale):
         if not file_exists:
             writer.writerow(
                 ["Paper Id","Publishability", "Recommended Conference", "Rationale"]
-            )  # Add header
+            )  
         writer.writerow([paper_id,publishability, recommended_conference, rationale])
 
 
@@ -215,9 +215,9 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
 
 # Set up reading from Google Drive with metadata
 table = pw.io.gdrive.read(
-    object_id="1Y2Y0EsMalo26KcJiPYcAXh6UzgMNjh4u",  # main folder ID; adjust if needed
+    object_id="1Y2Y0EsMalo26KcJiPYcAXh6UzgMNjh4u",  
     service_user_credentials_file="credentials.json",
-    with_metadata=True,  # Retrieve metadata alongside file data
+    with_metadata=True,  
 )
 
 pw.io.subscribe(table, on_change)
