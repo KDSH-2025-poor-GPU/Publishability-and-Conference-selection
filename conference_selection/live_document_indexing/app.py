@@ -1,5 +1,4 @@
 import logging
-import subprocess
 import pathway as pw
 from dotenv import load_dotenv
 from pathway.xpacks.llm.document_store import DocumentStore

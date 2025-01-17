@@ -1,4 +1,9 @@
 $sources:
+#  - !pw.io.fs.read
+#    path: data
+#    format: binary
+#    with_metadata: true
+#
   - !pw.io.gdrive.read
     object_id: "1RKyDkAyW7cf09THED7Ms4LNBdeTDWnlK"
     service_user_credentials_file: credentials.json

@@ -14,12 +14,14 @@ import csv
 import google.generativeai as genai
 from collections import defaultdict
 from pathway.xpacks.llm.splitters import TokenCountSplitter
+from pathway.xpacks.llm import rerankers
 import time
 from joblib import load
 from notebook_loader import generate_optimized_prompt,generate_scores,score_paper
 
+reranker_model_name = "cross-encoder/ms-marco-TinyBERT-L-2-v2"
 classfier_model=load("decisionclassifier.joblib")
-load_dotenv()
+load_dotenv() #TODO: modify instructions to provide DOCUMENTSTORE_API_URL
 
 # Initialize tokenizer for the specified model
 model_name = "mixedbread-ai/mxbai-embed-large-v1"
@@ -48,7 +50,7 @@ PARENT_TO_LABEL = {
 }
 
 
-def write_to_csv(paper_id,publishability, recommended_conference, rationale):
+def write_to_csv(paper_id, publishability, recommended_conference, rationale):
     file_exists = os.path.exists("results.csv")
     with open("results.csv", mode="a", newline="") as file:
         writer = csv.writer(file)
@@ -122,18 +124,24 @@ def split_text_into_chunks(text, max_tokens=400):
 
 
 # URL of the API endpoint
-api_url = "http://0.0.0.0:8000/v1/retrieve"
+api_url = os.getenv("DOCUMENTSTORE_API_URL")
 
 
 def send_chunk_to_api(chunk):
     headers = {"Content-Type": "application/json"}
-    params = {"query": chunk, "k": 1}
+    params = {"query": chunk, "k": 3}
     while True:
         try:
             response = requests.get(api_url, headers=headers, params=params)
             if response.status_code == 200:
                 data = response.json()
-                logging.info(f"API Response: {data}")
+                reranker = rerankers.CrossEncoderReranker(model_name=reranker_model_name)
+                data = pd.DataFrame(data)
+                data = pw.debug.table_from_pandas(data)
+                data += data.select(
+                    reranker_score=reranker(pw.this.text, create_optimized_prompt(chunk)), parent=pw.this.metadata["parents"][0].as_str()
+                )
+                data = pw.debug.table_to_pandas(data)
                 return data
             else:
                 raise APIError(f"Failed to fetch data. Status code: {response.status_code}")
@@ -142,6 +150,15 @@ def send_chunk_to_api(chunk):
             logging.error("Trying again in 5 seconds...")
             time.sleep(5)
 
+def softmax(column):
+    exp_column = np.exp(column - np.max(column))  # Subtract max for numerical stability
+    return exp_column / exp_column.sum()
+
+def create_optimized_prompt(chunk):
+    return (
+        f"The following text is from a research paper: '{chunk}'. "
+        "Another text that matches in topic and research focus to the provided text is:"
+    )
 
 def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
     if is_addition:
@@ -189,23 +206,25 @@ def on_change(key: pw.Pointer, row: dict, time: int, is_addition: bool):
             chunks = split_text_into_chunks(cleaned_text, max_tokens=400)
 
             # Send each chunk to the API
-            conference_vote = defaultdict(int)
+            conference_weighted_sum = defaultdict(float)
             for chunk in chunks:
                 data = send_chunk_to_api(chunk)
-                if data:
+                if not data.empty:
+                    data["reranker_score"] = softmax(data["reranker_score"])
                     # Safely get conference recommendation from the API response
-                    parent_id = data[0]["metadata"]["parents"][0]
-                    recommended_conference = PARENT_TO_LABEL.get(parent_id, "Unknown")
-                    conference_vote[recommended_conference] += 1
+                    for i, row in data.iterrows():
+                        parent_id = row["parent"]
+                        recommended_conference = determine_label(parent_id)
+                        conference_weighted_sum[recommended_conference] += row["reranker_score"]
 
             # Determine final conference based on votes
-            if conference_vote:
-                final_conference = max(conference_vote, key=conference_vote.get)
+            if conference_weighted_sum:
+                final_conference = max(conference_weighted_sum, key=conference_weighted_sum.get)
             else:
                 final_conference = "Unlabeled"
 
             rationale = generate_rationale(cleaned_text, final_conference)
-            write_to_csv(paper_id,prediction, final_conference, rationale)
+            write_to_csv(paper_id, prediction, final_conference, rationale)
             logging.info(
                 f"Processed publishable paper {paper_id}, selected conference {final_conference}."
             )
