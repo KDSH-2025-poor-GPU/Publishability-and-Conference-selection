@@ -2,19 +2,35 @@ version: '3.8'
 
 services:
   main:
-    image: Conference_Selection-main
+    build:
+      context: ./main
+      dockerfile: Dockerfile
+    image: conference_selection-main
     container_name: main_service
     restart: unless-stopped
     volumes:
       - ./data:/app/data    
     environment:
-      - USE_OCR=False      
+      - USE_OCR=False
+      - API_KEY=${API_KEY}
+      - DOCUMENTSTORE_API_URL=http://api:8000/v1/retrieve
     depends_on:
-      - api                 
+      - api
+    networks:
+      - conference_network
   
   api:
-    image: Conference_Selection-api
+    build:
+      context: ./live_document_indexing
+      dockerfile: Dockerfile
+    image: conference_selection-api
     container_name: api_service
     restart: unless-stopped
     ports:
-      - "8000:8000"        
+      - "8000:8000"
+    networks:
+      - conference_network
+
+networks:
+  conference_network:
+    driver: bridge
