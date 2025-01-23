@@ -2,13 +2,7 @@
 
 ## Step 1: Properly placing your credentials
 
-Place your `credentials.json` in the directories `./conference_selection/live_document_indexing/` and `./conference_selection/main/`
-
-Place a `.env` file in the directories `./conference_selection` and `./conference_selection/main/` \
-such that the file contains your Gemini API keys like the following:
-```dotenv
-API_KEY=...
-```
+Place your `credentials.json` in the directories `./conference_selection/live_document_indexing/` and `./conference_selection/main/` (for accessing Google Drive folders)
 
 ## Step 2: Running the solution for Task 1
 
@@ -17,18 +11,13 @@ In the end, the trained model will be stored in `./conference_selection/main/dec
 
 ## Step 3: Running the solution for Task 2
 
-In one terminal, execute:
+Execute the following:
 ```bash
-cd conference_selection/live_document_indexing/
-python app.py
-```
-
-**Note**: Please note that this `app.py` must be run before moving to the next step. Please keep this terminal open.
-
-In another terminal, execute:
-```bash
+export API_KEY=...
 cd conference_selection/main/
-python main.py
+docker-compose up --build
 ```
 
-The results will be stored in `./conference_selection/main/results.csv`
+(where `API_KEY` is your Google Gemini API Key)
+
+The results will be stored in `/app/results.csv` of the `main_service` container.
